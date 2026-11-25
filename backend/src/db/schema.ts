@@ -113,6 +113,13 @@ export const providerProfiles = sqliteTable("provider_profiles", {
    * A client cancelling, a refund, or a dispute with any other reason never
    * touches it. */
   providerCancellationCount: integer("provider_cancellation_count").notNull().default(0),
+  /**
+   * Admin suspension of a shop: `suspendedAt` hides it from discovery and
+   * booking until cleared; `suspensionReason` is the latest reason an admin
+   * gave. Once cleared, the shop returns without a second approval.
+   */
+  suspendedAt: integer("suspended_at"),
+  suspensionReason: text("suspension_reason"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -842,6 +849,7 @@ export const savedShops = sqliteTable(
   },
   (table) => [unique().on(table.clientWalletAddress, table.providerProfileId)],
 );
+/**
  * Shop reports: a signed-in client can report a shop listing to admins.
  * One report per client per shop per day. Does not change the shop's status.
  */
@@ -881,3 +889,36 @@ export const waitlistEntries = sqliteTable(
 );
 
 export type WaitlistEntryRow = typeof waitlistEntries.$inferSelect;
+
+/**
+ * Issue #7: one row per escrow contract id a deploy ever returned for a
+ * booking. History only -- settlement never reads a superseded id from here.
+ */
+export const escrowContractDeployments = sqliteTable(
+  "escrow_contract_deployments",
+  {
+    bookingId: text("booking_id").notNull(),
+    /** The Trustless Work escrow's own identity (a Soroban `C...`). */
+    contractId: text("contract_id").notNull(),
+    /** UTC epoch seconds when this contract id was persisted. */
+    deployedAt: integer("deployed_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.bookingId, table.contractId] })],
+);
+
+/**
+ * Issue #31: one in-app event row per party per booking-level action
+ * (lock, release, dispute, resolve).
+ */
+export const escrowEvents = sqliteTable("escrow_events", {
+  id: text("id").primaryKey(),
+  bookingId: text("booking_id")
+    .notNull()
+    .references(() => bookings.id),
+  /** Which party this event row is visible to -- client or provider wallet. */
+  walletAddress: text("wallet_address").notNull(),
+  /** `lock` | `release` | `dispute` | `resolve`. */
+  type: text("type", { enum: ["lock", "release", "dispute", "resolve"] }).notNull(),
+  /** UTC epoch seconds -- the event's own wall-clock when it was recorded. */
+  createdAt: integer("created_at").notNull(),
+});

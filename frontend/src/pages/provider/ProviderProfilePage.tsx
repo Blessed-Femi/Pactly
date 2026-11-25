@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 
-import { joinWaitlist, submitShopReport, usePublicProviderProfile } from "../../api/hooks";
+import { joinWaitlist, saveShop, submitShopReport, unsaveShop, useIsShopSaved, usePublicProviderProfile } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import { DepositPill } from "../../components/DepositPill";
 import { ProviderHeader } from "../../components/ProviderHeader";
@@ -22,6 +22,11 @@ export function ProviderProfilePage() {
   const { data: profile, isLoading, error } = usePublicProviderProfile(id);
   
   const [session] = useState<Session | undefined>(() => getSession());
+  const { data: savedData, refetch: refetchSaved } = useIsShopSaved(id, session);
+  const [savingState, setSavingState] = useState<"idle" | "saving" | "unsaving">("idle");
+  const [saveNotice, setSaveNotice] = useState<string | undefined>();
+  const isSaved = savedData?.isSaved ?? false;
+
   const [showReportDialog, setShowReportDialog] = useState(false);
   const [reportReason, setReportReason] = useState("");
   const [reportSubmitting, setReportSubmitting] = useState(false);
@@ -80,6 +85,9 @@ export function ProviderProfilePage() {
       }
     } finally {
       setSavingState("idle");
+    }
+  }
+
   async function handleReportSubmit(): Promise<void> {
     if (!session || !id) return;
     
@@ -181,8 +189,11 @@ export function ProviderProfilePage() {
     return null;
   }
 
-const dayGroups = groupSlotsByDay(profile.slots);
-  
+  const dayGroups = groupSlotsByDay(profile.slots);
+  // Older API responses predate `reviews`; an absent field means no reviews,
+  // not a broken page.
+  const reviews = profile.reviews ?? [];
+
   const canSave = session && profile.isApproved;
   const canReport = session && profile.isApproved;
   const canWaitlist = session && profile.isApproved;
@@ -214,6 +225,9 @@ const dayGroups = groupSlotsByDay(profile.slots);
             {savingState === "idle" && (isSaved ? "★ Saved" : "☆ Save shop")}
           </button>
           {saveNotice && <span style={{ fontSize: "var(--text-14)", color: "var(--color-text-secondary)" }}>{saveNotice}</span>}
+        </div>
+      )}
+
       {canReport && (
         <div style={{ marginTop: "var(--space-4)" }}>
           <button
@@ -301,11 +315,11 @@ const dayGroups = groupSlotsByDay(profile.slots);
        * booking it came from, in the client's own bookings list. */}
       <section className="card" style={{ marginTop: "var(--space-6)" }}>
         <h2 style={{ fontSize: "var(--text-18)" }}>Reviews</h2>
-        {profile.reviews.length === 0 ? (
+        {reviews.length === 0 ? (
           <p className="banner">No reviews yet.</p>
         ) : (
           <ul className="review-list">
-            {profile.reviews.map((review) => (
+            {reviews.map((review) => (
               <li key={review.id} className="review-list__item">
                 <p className="review-list__rating">{review.rating} out of 5</p>
                 {review.comment && <p className="review-list__comment">{review.comment}</p>}

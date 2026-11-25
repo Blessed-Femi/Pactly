@@ -217,6 +217,7 @@ export function BookingsPage() {
                         balance={booking.balance}
                         balanceState={booking.balanceState}
                         slotStartsAt={booking.slotStartsAt}
+                        arrivedAt={booking.arrivedAt}
                         cancelDeadline={booking.cancelDeadline}
                         serverTime={booking.serverTime}
                         session={session}
@@ -262,6 +263,7 @@ export function BookingsPage() {
                 balanceState={booking.balanceState}
                 cancelDeadline={booking.cancelDeadline}
                 serverTime={booking.serverTime}
+                arrivedAt={booking.arrivedAt}
                 contractId={booking.contractId}
                 balancePaymentTxHash={booking.balancePaymentTxHash}
                 session={session}
@@ -297,6 +299,7 @@ export function BookingsPage() {
                 balanceState={booking.balanceState}
                 cancelDeadline={booking.cancelDeadline}
                 serverTime={booking.serverTime}
+                arrivedAt={booking.arrivedAt}
                 contractId={booking.contractId}
                 balancePaymentTxHash={booking.balancePaymentTxHash}
                 session={session}

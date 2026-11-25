@@ -36,7 +36,7 @@ function activeBookingForSlot(now: number) {
       // cleared on a state transition) would read as "active" again via
       // this second clause alone, defeating the whole point of excluding
       // `refunded` above.
-      and(isNull(bookings.escrowState), gte(bookings.holdExpiresAt, now)),
+      and(isNull(bookings.escrowState), gt(bookings.holdExpiresAt, now)),
     ),
   );
 }
@@ -48,7 +48,7 @@ function isBookingActive(booking: Pick<typeof bookings.$inferSelect, "escrowStat
   if (booking.escrowState !== null) {
     return booking.escrowState !== "refunded";
   }
-  return booking.holdExpiresAt !== null && booking.holdExpiresAt >= now;
+  return booking.holdExpiresAt !== null && booking.holdExpiresAt > now;
 }
 
 export interface ListFutureSlotsOptions {

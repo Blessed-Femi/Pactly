@@ -36,6 +36,11 @@ export interface BookingCardProps {
   balanceState: BalanceState;
   /** UTC epoch seconds. */
   cancelDeadline: number;
+  /** UTC epoch seconds from the booking payload -- keeps the free-cancel
+   * countdown and the cancel action aligned with the server's clock. */
+  serverTime?: number;
+  /** UTC epoch seconds -- when the provider marked the client as arrived. */
+  arrivedAt?: number | null;
   /** `"shop-closed-date"` when the shop closed this date and released this
    * unpaid hold -- shown as "no deposit was taken". */
   holdReleasedReason?: "shop-closed-date" | null;
@@ -68,6 +73,11 @@ export interface BookingCardProps {
   declinedAt?: number | null;
   /** Provider view only: shows "Decline hold" for a live, unlocked hold. */
   canDecline?: boolean;
+  /** The client's own review of this released booking, when one exists. */
+  review?: ProviderReview;
+  /** Called once the client's review has been saved -- the caller's cue to
+   * refetch so the form gives way to the saved review. */
+  onReviewSubmitted?: (review: ProviderReview) => void;
 }
 
 /** The balance row's own three-state wording (Epic 3 context: "Balance
@@ -102,6 +112,8 @@ export function BookingCard({
   pendingAction,
   balanceState,
   cancelDeadline,
+  serverTime,
+  arrivedAt,
   holdReleasedReason,
   contractId,
   balancePaymentTxHash,
@@ -113,6 +125,8 @@ export function BookingCard({
   shopName,
   declinedAt,
   canDecline,
+  review,
+  onReviewSubmitted,
 }: BookingCardProps) {
   const declined = declinedAt != null;
   const releaseMailto =
@@ -213,6 +227,7 @@ export function BookingCard({
         balance={balance}
         balanceState={balanceState}
         slotStartsAt={slotStartsAt}
+        arrivedAt={arrivedAt ?? null}
         cancelDeadline={cancelDeadline}
         serverTime={serverTime}
         session={session}

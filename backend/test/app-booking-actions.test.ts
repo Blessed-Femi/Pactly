@@ -76,12 +76,21 @@ function fakeEscrowAdapter(overrides: Partial<EscrowAdapter> = {}): EscrowAdapte
  * hold-expiry tests). */
 async function seedLockedBooking(
   result: Awaited<ReturnType<typeof openTestDatabase>>,
-  options: { clientWalletAddress?: string; providerWalletAddress?: string; lifecycleAction?: "funded" | "completed" | "approved" | "disputed" } = {},
+  options: {
+    clientWalletAddress?: string;
+    providerWalletAddress?: string;
+    cancelDeadline?: number;
+    lifecycleAction?: "funded" | "completed" | "approved" | "disputed" | "released";
+  } = {},
 ): Promise<{ bookingId: string; contractId: string; clientWalletAddress: string; providerWalletAddress: string }> {
   const clientWalletAddress = options.clientWalletAddress ?? Keypair.random().publicKey();
   const providerWalletAddress = options.providerWalletAddress ?? Keypair.random().publicKey();
   const providerProfileId = await seedProviderProfile(result, { walletAddress: providerWalletAddress });
-  const bookingId = await seedBooking(result, { providerProfileId, clientWalletAddress });
+  const bookingId = await seedBooking(result, {
+    providerProfileId,
+    clientWalletAddress,
+    cancelDeadline: options.cancelDeadline,
+  });
   const contractId = fakeContractId();
   await updateEscrowContractId(result.db, bookingId, contractId);
   updateEscrowStateSync(result.db, bookingId, "locked");
@@ -287,7 +296,7 @@ test("POST /bookings/:id/dispute: 400 for an unknown reason, before ever reachin
 test("POST /bookings/:id/dispute: 200 for the client with a known reason, carrying the suggested outcome", async () => {
   const result = openTestDatabase();
   try {
-    const seed = await seedLockedBooking(result);
+    const seed = await seedLockedBooking(result, { cancelDeadline: Math.floor(Date.now() / 1000) - 3600 });
     const adapter = fakeEscrowAdapter({ startDispute: async () => ({ unsignedXdr: "x", txHash: "dispute-tx-hash" }) });
     const app = createApp(result.db, { escrowAdapter: adapter });
     const response = await app.request(`/bookings/${seed.bookingId}/dispute`, {
@@ -321,6 +330,34 @@ test("POST /bookings/:id/dispute: 404 for a wallet that owns neither role on thi
   }
 });
 
+test("POST /bookings/:id/dispute: 409 DEPOSIT_RELEASED for stale locked row with released lifecycle", async () => {
+  const result = openTestDatabase();
+  try {
+    const seed = await seedLockedBooking(result, { lifecycleAction: "released" });
+    let adapterCalls = 0;
+    const app = createApp(result.db, {
+      escrowAdapter: fakeEscrowAdapter({
+        startDispute: async () => {
+          adapterCalls++;
+          return { unsignedXdr: "x", txHash: "should-not-run" };
+        },
+      }),
+    });
+    const response = await app.request(`/bookings/${seed.bookingId}/dispute`, {
+      method: "POST",
+      headers: await authHeader(seed.clientWalletAddress),
+      body: JSON.stringify({ reason: "disagreement" }),
+    });
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as { code: string; message: string };
+    assert.equal(body.code, "DEPOSIT_RELEASED");
+    assert.match(body.message, /released/i);
+    assert.equal(adapterCalls, 0);
+  } finally {
+    closeDatabase(result);
+  }
+});
+
 test("POST /bookings/:id/dispute: 409 once a dispute is already open", async () => {
   const result = openTestDatabase();
   try {
@@ -344,7 +381,7 @@ test("POST /bookings/:id/dispute: 409 once a dispute is already open", async () 
 test("POST /bookings/:id/dispute: 200 stores and returns the note and evidence hash", async () => {
   const result = openTestDatabase();
   try {
-    const seed = await seedLockedBooking(result);
+    const seed = await seedLockedBooking(result, { cancelDeadline: Math.floor(Date.now() / 1000) - 3600 });
     const adapter = fakeEscrowAdapter({ startDispute: async () => ({ unsignedXdr: "x", txHash: "dispute-tx-hash" }) });
     const app = createApp(result.db, { escrowAdapter: adapter });
     const response = await app.request(`/bookings/${seed.bookingId}/dispute`, {
@@ -479,7 +516,10 @@ test("POST /admin/bookings/:id/resolve: 200 for the dispute-resolver admin walle
 test("GET /admin/disputes: 404 for a non-admin wallet; 200 with the open dispute for an admin wallet", async () => {
   const result = openTestDatabase();
   try {
-    const seed = await seedLockedBooking(result, { lifecycleAction: "funded" });
+    const seed = await seedLockedBooking(result, {
+      lifecycleAction: "funded",
+      cancelDeadline: Math.floor(Date.now() / 1000) - 3600,
+    });
     const disputeTx = buildFakeTransactionXdr();
     const disputeAdapter = fakeEscrowAdapter({
       startDispute: async () => ({ unsignedXdr: "x", txHash: disputeTx.hash }),

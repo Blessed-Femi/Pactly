@@ -7,11 +7,19 @@ import { PageMasthead } from "../../components/PageMasthead";
 import { SignInPanel } from "../../components/SignInPanel";
 import {
   closeProviderDate,
+  useClosedDates,
+  useCloseDate,
   useOwnProviderProfile,
+  useReopenDate,
   useTryRate,
   useUpdateProviderAvailability,
+  useUpdateProviderBreaks,
+  useUpdateProviderProfile,
   useUpdateProviderRules,
+  useUpdateProviderTimezone,
 } from "../../api/hooks";
+import type { ProviderBreak } from "../../api/types";
+import { formatSlotTime } from "../../lib/time";
 import { TryAmount } from "../../components/TryAmount";
 import { currencyToUsdcSmallestUnit, usdcToCurrency } from "../../lib/money";
 import { getSession, signOut, type Session } from "../../wallet";
@@ -154,10 +162,12 @@ export function AvailabilityPage() {
   const updateRules = useUpdateProviderRules(session);
   const updateAvailability = useUpdateProviderAvailability(session);
   const updateProfile = useUpdateProviderProfile(session);
+  const updateTimezone = useUpdateProviderTimezone(session);
+  const updateBreaks = useUpdateProviderBreaks(session);
   const closedDatesQuery = useClosedDates(session);
   const closeDateMutation = useCloseDate(session);
   const reopenDateMutation = useReopenDate(session);
-  const { rate } = useTryRate();
+  const { rate, isFallback, currency, decimals } = useTryRate();
 
   // The price is stored in USDC smallest units (AD-7) but typed in TRY.
   // Until the provider actually edits the field, what it shows is *derived*
@@ -172,10 +182,24 @@ export function AvailabilityPage() {
   const [bufferMinutesInput, setBufferMinutesInput] = useState("");
   const [maxBookingDaysInput, setMaxBookingDaysInput] = useState("");
   const [selectedSlots, setSelectedSlots] = useState<Set<number>>(new Set());
+  const [timezoneInput, setTimezoneInput] = useState("");
+  const [breaks, setBreaks] = useState<ProviderBreak[]>([]);
+  const [breakWeekday, setBreakWeekday] = useState(1);
+  const [breakStart, setBreakStart] = useState("13:00");
+  const [breakEnd, setBreakEnd] = useState("14:00");
   const [closeDate, setCloseDate] = useState("");
   const [closeBusy, setCloseBusy] = useState(false);
   const [closeResult, setCloseResult] = useState<Awaited<ReturnType<typeof closeProviderDate>> | undefined>();
   const [closeError, setCloseError] = useState<string | undefined>();
+  const [editTitle, setEditTitle] = useState("");
+  const [editBio, setEditBio] = useState("");
+  const [editLanguages, setEditLanguages] = useState("");
+  const [editSessionLength, setEditSessionLength] = useState("");
+  const [editLocation, setEditLocation] = useState("");
+  const [exportFrom, setExportFrom] = useState(() => toDateInput(Date.now() - 6 * 24 * 60 * 60 * 1000));
+  const [exportTo, setExportTo] = useState(() => toDateInput(Date.now()));
+  const [exportError, setExportError] = useState<string | undefined>(undefined);
+  const [exporting, setExporting] = useState(false);
 
   // Seeds local form state only the first time a profile loads, or when it
   // switches to a *different* profile (a new sign-in) -- never on every
@@ -198,7 +222,9 @@ export function AvailabilityPage() {
           ? ""
           : String(profileQuery.data.maxBookingDaysAhead),
       );
+      setTimezoneInput(profileQuery.data.timezone);
       setSelectedSlots(new Set(profileQuery.data.slots));
+      setBreaks(profileQuery.data.breaks ?? []);
       setEditTitle(profileQuery.data.title);
       setEditBio(profileQuery.data.bio ?? "");
       setEditLanguages((profileQuery.data.languages ?? []).join(", "));
@@ -391,6 +417,34 @@ export function AvailabilityPage() {
     } catch {
       // Surfaced through `updateAvailability.error`/`availabilityErrorDetails`/
       // `availabilityGenericError` below -- nothing further to do here.
+    }
+  }
+
+  const profileErrorDetails =
+    updateProfile.error instanceof ApiError ? (updateProfile.error.details as Record<string, string> | undefined) : undefined;
+  const profileNotApproved =
+    updateProfile.error instanceof ApiError && updateProfile.error.code === "NOT_APPROVED";
+
+  async function handleSaveProfile(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    try {
+      const saved = await updateProfile.mutateAsync({
+        title: editTitle,
+        bio: editBio,
+        languages: editLanguages
+          .split(",")
+          .map((language) => language.trim())
+          .filter(Boolean),
+        sessionLengthMinutes: Number(editSessionLength),
+        location: editLocation,
+      });
+      setEditTitle(saved.title);
+      setEditBio(saved.bio ?? "");
+      setEditLanguages((saved.languages ?? []).join(", "));
+      setEditSessionLength(String(saved.sessionLengthMinutes));
+      setEditLocation(saved.location);
+    } catch {
+      // Surfaced through `updateProfile.error`/`profileErrorDetails`.
     }
   }
 

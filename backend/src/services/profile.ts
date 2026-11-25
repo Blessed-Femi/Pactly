@@ -21,7 +21,9 @@ import {
   listApprovedProviderProfiles,
   listApprovedProviderProfilesForDiscover,
   setProviderProfileBookingsPaused,
+  setProviderProfileSuspension,
   updateProviderProfileRules,
+  updateProviderProfileTimezone,
   updateProviderProfileText as persistProviderProfileText,
   type ProviderProfileRow,
 } from "../db/providerProfiles.js";
@@ -33,8 +35,19 @@ import {
 } from "../db/availabilitySlots.js";
 import { getCategoryById, getCategoryBySlug, listCategories, listVisibleCategories, type CategoryRow } from "../db/categories.js";
 import type { Db } from "../db/client.js";
-import { listEarliestOfferedSlotsByProvider, listOfferedSlots } from "./availability.js";
+import { listProviderBreaks, replaceProviderBreaks } from "../db/providerBreaks.js";
+import {
+  assertBreaksWithinRanges,
+  filterSlotsOutsideBreaks,
+  listEarliestOfferedSlotsByProvider,
+  listOfferedSlots,
+  validateBreaks,
+  workingRangesForSlots,
+  type ProviderBreak,
+} from "./availability.js";
 import { isWithinBookingWindow } from "./bookingWindow.js";
+import { buildPublicHours, type PublicDayHours } from "./publicHours.js";
+import { isValidTimeZone } from "./timezone.js";
 
 /** Pactly's only supported asset for now (matches `services/booking.ts`'s
  * own `DEPOSIT_ASSET_SYMBOL`). Every amount this module returns is shaped
@@ -366,6 +379,13 @@ export interface ProviderProfileView {
    * verified-session line. An honest zero, never hidden. */
   providerCancellationCount: number;
   isApproved: boolean;
+  /** A suspended shop is never returned publicly (`getPublicProviderProfile`
+   * refuses it), but its own panel still reads the profile -- that is what
+   * shows the reason below. */
+  isSuspended: boolean;
+  /** The latest admin-stated reason, or `null` when the shop is not
+   * suspended. */
+  suspensionReason: string | null;
   /** Issue #62: the shop has paused new bookings. `slots` is empty while
    * this is `true` (existing bookings are unaffected), and the profile page
    * says so instead of offering a slot. */
@@ -387,8 +407,6 @@ export interface ProviderProfileView {
 export function buildProviderProfileView(
   profile: ProviderProfileRow,
   category: CategoryRow,
-  slots: AvailabilitySlotRow[],
-  reviews: ReviewView[] = [],
   slots: Array<Pick<AvailabilitySlotRow, "startsAt"> | number>,
 ): ProviderProfileView {
   let languages: string[] = [];
@@ -422,6 +440,10 @@ export function buildProviderProfileView(
     verifiedSessionCount: profile.verifiedSessionCount,
     providerCancellationCount: profile.providerCancellationCount,
     isApproved: profile.isApproved,
+    isSuspended: profile.suspendedAt !== null,
+    suspensionReason: profile.suspensionReason ?? null,
+    bookingsPaused: profile.bookingsPaused,
+    timezone: profile.timezone,
     slots: slots.map((slot) => (typeof slot === "number" ? slot : slot.startsAt)),
   };
 }
@@ -466,12 +488,16 @@ export async function getPublicProviderProfile(
     throw new ProviderNotFoundError();
   }
   const category = await loadCategoryOrThrow(db, profile.categoryId, () => new ProviderNotFoundError());
-  const offeredStarts = await listOfferedSlots(db, profile.id, {
-    now,
-    withinSeconds: PUBLIC_SLOTS_WINDOW_SECONDS,
-    sessionLengthMinutes: profile.sessionLengthMinutes,
-    bufferMinutes: profile.bufferMinutes,
-  });
+  // Issue #62: a paused shop hides its new slots (existing bookings keep
+  // their slots -- those are only read through the booking routes).
+  const offeredStarts = profile.bookingsPaused
+    ? []
+    : await listOfferedSlots(db, profile.id, {
+        now,
+        withinSeconds: PUBLIC_SLOTS_WINDOW_SECONDS,
+        sessionLengthMinutes: profile.sessionLengthMinutes,
+        bufferMinutes: profile.bufferMinutes,
+      });
   const noticeSeconds = (profile.minimumNoticeMinutes ?? 0) * 60;
   let visibleStarts = noticeSeconds > 0
     ? offeredStarts.filter((startsAt) => startsAt >= now + noticeSeconds)
@@ -977,6 +1003,12 @@ export async function listDiscoverProviders(
       (profile) => earliestSlotsByProvider.get(profile.id)?.[0] !== undefined,
     );
   }
+
+  const weeklyPatternSlotsByProvider = await listWeeklyPatternSlotsByProvider(
+    db,
+    profiles.map((profile) => profile.id),
+    now,
+  );
 
   const cards = profiles.map((profile) => {
     const category = categoryById.get(profile.categoryId);

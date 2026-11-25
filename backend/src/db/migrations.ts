@@ -150,6 +150,19 @@ const STATEMENTS: readonly string[] = [
     processed_at INTEGER NOT NULL,
     PRIMARY KEY (booking_id, event_type)
   )`,
+  `CREATE TABLE IF NOT EXISTS escrow_contract_deployments (
+    booking_id TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    deployed_at INTEGER NOT NULL,
+    PRIMARY KEY (booking_id, contract_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS escrow_events (
+    id TEXT PRIMARY KEY,
+    booking_id TEXT NOT NULL REFERENCES bookings(id),
+    wallet_address TEXT NOT NULL,
+    type TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS escrow_processed_events (
     booking_id TEXT NOT NULL,
     contract_id TEXT NOT NULL,
@@ -312,6 +325,15 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "provider_profiles", "max_booking_days_ahead")) {
     sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN max_booking_days_ahead INTEGER`);
   }
+  // Issue #62: the shop's own pause/resume of new bookings.
+  if (!hasColumn(sqlite, "provider_profiles", "bookings_paused")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN bookings_paused INTEGER NOT NULL DEFAULT 0`);
+  }
+  // Issue #64: the shop's own IANA timezone for labelling its slots. A
+  // pre-existing row defaults to the zone the hours grid already used.
+  if (!hasColumn(sqlite, "provider_profiles", "timezone")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Europe/Istanbul'`);
+  }
   // Story 3.4: the AD-13 slot hold's own columns -- nullable, since a
   // database created before this story has `bookings` rows that never had a
   // slot or a hold expiry (and never will retroactively).
@@ -458,9 +480,22 @@ export function runMigrations(sqlite: Database): void {
   // Mark client arrived: the shop marks when a client walks in.
   if (!hasColumn(sqlite, "bookings", "arrived_at")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN arrived_at INTEGER`);
+  }
+  // Trust counters are credited once per booking, by the first matching
+  // event. Both are nullable and stay null until their event is observed.
+  if (!hasColumn(sqlite, "bookings", "verified_session_counted_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN verified_session_counted_at INTEGER`);
+  }
+  if (!hasColumn(sqlite, "bookings", "provider_cancellation_counted_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN provider_cancellation_counted_at INTEGER`);
+  }
   // Optional client email for the shop's post-release mailto draft (#47).
   if (!hasColumn(sqlite, "bookings", "client_email")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN client_email TEXT`);
+  }
+  // Story 3.8: the client's private note on the booking. Backfill nullable.
+  if (!hasColumn(sqlite, "bookings", "note")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN note TEXT`);
   }
   // Issue #35: appointment reminders
   if (!hasColumn(sqlite, "bookings", "client_reminder_shown_at")) {

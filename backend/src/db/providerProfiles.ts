@@ -186,9 +186,10 @@ export async function listApprovedProviderProfilesForDiscover(
       minimumNoticeMinutes: providerProfiles.minimumNoticeMinutes,
       maxBookingDaysAhead: providerProfiles.maxBookingDaysAhead,
       bufferMinutes: providerProfiles.bufferMinutes,
-      minimumNoticeMinutes: providerProfiles.minimumNoticeMinutes,
       isApproved: providerProfiles.isApproved,
       bookingsPaused: providerProfiles.bookingsPaused,
+      suspendedAt: providerProfiles.suspendedAt,
+      suspensionReason: providerProfiles.suspensionReason,
       timezone: providerProfiles.timezone,
       verifiedSessionCount: providerProfiles.verifiedSessionCount,
       providerCancellationCount: providerProfiles.providerCancellationCount,
@@ -311,6 +312,54 @@ export async function updateProviderProfileRules(db: Db, id: string, values: Pro
   const result = await db
     .update(providerProfiles)
     .set(updateFields)
+    .where(eq(providerProfiles.id, id));
+  if (result.changes === 0) {
+    throw new TypeError(`No provider profile exists with id "${id}"`);
+  }
+}
+
+/** Issue #62: the shop's own pause/resume of new bookings. Idempotent --
+ * pausing an already-paused shop simply writes `true` again. */
+export async function setProviderProfileBookingsPaused(db: Db, id: string, bookingsPaused: boolean): Promise<void> {
+  const result = await db.update(providerProfiles).set({ bookingsPaused }).where(eq(providerProfiles.id, id));
+  if (result.changes === 0) {
+    throw new TypeError(`No provider profile exists with id "${id}"`);
+  }
+}
+
+/** Issue #64: writes the shop's own IANA timezone. Only ever changes the
+ * label a slot is rendered with -- the stored `starts_at` instants are not
+ * touched. */
+export async function updateProviderProfileTimezone(db: Db, id: string, timezone: string): Promise<void> {
+  const result = await db.update(providerProfiles).set({ timezone }).where(eq(providerProfiles.id, id));
+  if (result.changes === 0) {
+    throw new TypeError(`No provider profile exists with id "${id}"`);
+  }
+}
+
+export interface ProviderProfileSuspension {
+  /** UTC epoch milliseconds, like every `createdAt` in the schema. */
+  suspendedAt: number;
+  reason: string;
+}
+
+/** Admin suspension's one write. Passing `null` clears both columns
+ * (unsuspend); passing a suspension writes the latest reason over whatever
+ * was there before, so suspending twice keeps only the newest reason.
+ * `isApproved` is deliberately untouched -- a suspended shop stays
+ * approved internally and comes back to discovery on unsuspend without a
+ * second admin approval. */
+export async function setProviderProfileSuspension(
+  db: Db,
+  id: string,
+  suspension: ProviderProfileSuspension | null,
+): Promise<void> {
+  const result = await db
+    .update(providerProfiles)
+    .set({
+      suspendedAt: suspension?.suspendedAt ?? null,
+      suspensionReason: suspension?.reason ?? null,
+    })
     .where(eq(providerProfiles.id, id));
   if (result.changes === 0) {
     throw new TypeError(`No provider profile exists with id "${id}"`);

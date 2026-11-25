@@ -11,7 +11,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { openDatabase, closeDatabase, type OpenDatabaseResult } from "../src/db/client.js";
 import { categories, type BalanceState } from "../src/db/schema.js";
 import { insertProviderProfile } from "../src/db/providerProfiles.js";
-import { insertBooking } from "../src/db/bookings.js";
+import { insertBooking, setAnchorDeposit } from "../src/db/bookings.js";
 import type { ChainEvent, EventName } from "../src/chain/events.js";
 import type { UsdcTrustlineDeps } from "../src/anchor/trustline.js";
 import type { UsdcAsset } from "../src/anchor/usdc.js";
@@ -113,6 +113,11 @@ export interface SeedBookingOptions {
   balanceAmount?: string;
   balanceState?: BalanceState;
   cancelDeadline?: number;
+  /** Issue #48: `lockDeposit` now refuses a booking with no credited anchor
+   * transfer. Most tests seed one matching the deposit so they can exercise
+   * their own concern; `"none"` opts out for the short-deposit refusal. A
+   * plain decimal string credits that amount instead of the full deposit. */
+  anchorDeposit?: string | "none";
 }
 
 /** 32 lowercase hex characters -- the same shape `chain/client.ts`'s
@@ -128,17 +133,26 @@ export function randomBookingId(): string {
 export async function seedBooking(result: OpenDatabaseResult, options: SeedBookingOptions = {}): Promise<string> {
   const bookingId = options.bookingId ?? randomBookingId();
   const providerProfileId = options.providerProfileId ?? (await seedProviderProfile(result));
+  const depositAmount = options.depositAmount ?? "1000000";
   await insertBooking(result.db, {
     id: bookingId,
     providerProfileId,
     clientWalletAddress: options.clientWalletAddress ?? `GCLIENT${bookingId.toUpperCase().slice(0, 20)}`,
     tokenAddress: options.tokenAddress ?? `CTOKEN${bookingId.toUpperCase().slice(0, 20)}`,
-    depositAmount: options.depositAmount ?? "1000000",
+    depositAmount,
     balanceAmount: options.balanceAmount,
     cancelDeadline: options.cancelDeadline ?? Math.floor(Date.now() / 1000) + 3600,
     balanceState: options.balanceState,
     createdAt: Date.now(),
   });
+  if (options.anchorDeposit !== "none") {
+    await setAnchorDeposit(result.db, bookingId, {
+      id: `anchor-${bookingId}`,
+      status: "completed",
+      amountIn: options.anchorDeposit ?? depositAmount,
+      updatedAt: Math.floor(Date.now() / 1000),
+    });
+  }
   return bookingId;
 }
 

@@ -99,7 +99,14 @@ import {
   listLockedBookingStarts,
   listOfferedSlotsInRange,
 } from "./availability.js";
-import { recordEscrowDisputeResolution } from "../db/escrowDisputeResolutions.js";
+import {
+  getEscrowDisputeResolution,
+  recordEscrowDisputeResolution,
+  recordEscrowDisputeResolutionSync,
+} from "../db/escrowDisputeResolutions.js";
+import { recordEscrowEventForBothParties } from "../db/escrowEvents.js";
+import { listContractDeployments, recordContractDeployment } from "../db/escrowContractDeployments.js";
+import { insertAdminDecisionAuditSync } from "../db/adminDecisionAudit.js";
 import { escrowDisputeOpenings, bookings } from "../db/schema.js";
 import { getEscrowDisputeOpening, getEscrowDisputeOpeningsForBookings, recordEscrowDisputeOpening } from "../db/escrowDisputeOpenings.js";
 import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
@@ -586,6 +593,15 @@ export class BookingEscrowStateError extends Error {
   }
 }
 
+/** A deposit that has already been released, either in the booking row or in
+ * the matching chain lifecycle, cannot be disputed. */
+export class ReleasedDepositError extends Error {
+  constructor(message = "The deposit has already been released.") {
+    super(message);
+    this.name = "ReleasedDepositError";
+  }
+}
+
 /** A signed transaction `submitSignedTransaction` was handed does not
  * match this booking's own stored deploy or fund `txHash` -- either a
  * stale/foreign envelope, or one that failed to decode at all. Refused
@@ -724,6 +740,20 @@ export async function declineHold(
     throw new BookingEscrowStateError(
       `Booking "${bookingId}" must be an unlocked hold to decline it (escrowState is "${booking.escrowState}")`,
     );
+  }
+}
+
+/**
+ * A hold may have been created when the slot was in the future, but
+ * locking/funding must be refused once the slot start time has passed.
+ * This check applies to `lockDeposit` and `fundDeposit`.
+ */
+async function requireSlotNotInPast(db: Db, booking: BookingRow, now: number): Promise<void> {
+  if (booking.slotId !== null) {
+    const slot = await getSlotById(db, booking.slotId);
+    if (slot && slot.startsAt <= now) {
+      throw new SlotInPastError(slot.startsAt, now);
+    }
   }
 }
 
@@ -1172,10 +1202,14 @@ export async function withdrawDispute(
     }
   }
   
+  // A locally recorded dispute is kept in `escrow_dispute_openings`; the
+  // booking row itself may still carry the legacy `"disputed"` marker.
+  // Widen only for this comparison so the typed schema union stays intact.
+  const storedEscrowState: string | null = booking.escrowState;
   // If the dispute is already resolved (escrowState is not "disputed"), reject withdrawal
-  if (booking.escrowState !== "disputed") {
+  if (storedEscrowState !== "disputed") {
     // If it's already locked (previously withdrawn), this is a safe no-op
-    if (booking.escrowState === "locked") {
+    if (storedEscrowState === "locked") {
       const opening = await getEscrowDisputeOpening(db, bookingId);
       return { bookingId, escrowState: "locked", withdrawnAt: opening?.withdrawnAt ?? null };
     }
@@ -1495,6 +1529,13 @@ export async function openDispute(
     throw new BookingEscrowStateError(
       `Booking "${bookingId}" has no chain-confirmed evidence yet for its current escrow contractId`,
     );
+  }
+  if (
+    (booking.escrowState as string | null) === "released"
+    || lifecycle.action === "released"
+    || (lifecycle.action === "resolved" && lifecycle.outcome === "pay-provider")
+  ) {
+    throw new ReleasedDepositError();
   }
   if (booking.escrowDisputeSubmittedAt !== null && lifecycle.action !== "disputed") {
     throw new BookingActionPendingError();
@@ -2017,6 +2058,11 @@ export interface BookingView {
   /** Story 3.6 (review round): see {@link derivePendingAction}. */
   pendingAction: EscrowActionKind | null;
   holdExpiresAt: number | null;
+  /** Set only when the shop closed this date and released this unpaid hold
+   * early (`shop-closed-date`); `null` for a plain expiry or a locked
+   * booking. Drives the client's "the shop closed this date, no deposit was
+   * taken" copy. */
+  holdReleasedReason: BookingRow["holdReleaseReason"];
   /** UTC epoch seconds when the shop declined this hold, `null` otherwise. */
   declinedAt: number | null;
   contractId: string | null;
@@ -2058,6 +2104,10 @@ export interface BookingView {
   /** Issue #35: true when this read triggered showing a reminder (appointment
    * day-before notice). False when already shown or conditions not met. */
   reminderShown: boolean;
+  /** The wallet that opened the latest recorded dispute for this booking's
+   * current contract, `null` when none was recorded. Drives the client's
+   * "you opened this dispute" view and the withdrawal action. */
+  disputeOpenedByWallet: string | null;
 }
 
 /** `GET /bookings/:id`'s own response shape: the booking's amounts (each
@@ -2116,6 +2166,7 @@ export async function getBookingView(
     lifecycle: { contractId: lifecycle.contractId, action: lifecycle.action, outcome: lifecycle.outcome },
     pendingAction: derivePendingAction(booking, lifecycle.action),
     holdExpiresAt: booking.holdExpiresAt,
+    holdReleasedReason: booking.holdReleaseReason,
     declinedAt: booking.declinedAt,
     contractId: booking.escrowContractId,
     deploySubmitted: booking.deploySubmittedAt !== null,
@@ -2407,6 +2458,10 @@ export interface BookingListItemBase {
   /** UTC epoch seconds -- when the provider marked the client as arrived,
    * `null` until marked. */
   arrivedAt: number | null;
+  /** UTC epoch seconds -- when the shop declined this hold. A declined hold
+   * is distinguished from one that merely timed out, including in the
+   * client's and provider's booking lists. */
+  declinedAt: number | null;
 }
 
 export interface ClientBookingListItem extends BookingListItemBase {
@@ -2472,6 +2527,7 @@ function toBookingListItemBase(
     holdReleasedReason: booking.holdReleaseReason,
     isExpiredHold: isExpiredHoldRow(booking, now),
     arrivedAt: booking.arrivedAt,
+    declinedAt: booking.declinedAt,
   };
 }
 
