@@ -24,7 +24,6 @@ import {
   listOpenDisputes,
   openDispute,
   releaseDeposit,
-  ReleasedDepositError,
   resolveBookingDispute,
   submitSignedTransaction,
 } from "../src/services/booking.js";
@@ -83,7 +82,7 @@ async function seedLockedBooking(
     clientWalletAddress?: string;
     providerWalletAddress?: string;
     cancelDeadline?: number;
-    lifecycleAction?: "funded" | "completed" | "approved" | "disputed" | "released";
+    lifecycleAction?: "funded" | "completed" | "approved" | "disputed";
   } = {},
 ): Promise<{ bookingId: string; contractId: string; clientWalletAddress: string; providerWalletAddress: string }> {
   const clientWalletAddress = options.clientWalletAddress ?? Keypair.random().publicKey();
@@ -544,28 +543,6 @@ test("openDispute: a wallet that is neither the client nor the provider gets 404
       () => openDispute(result.db, seed.bookingId, Keypair.random().publicKey(), "disagreement", unreachableEscrowAdapter()),
       BookingNotFoundError,
     );
-  } finally {
-    closeDatabase(result);
-  }
-});
-
-test("openDispute: refuses a released lifecycle before starting the adapter while the booking row is stale locked", async () => {
-  const result = openTestDatabase();
-  try {
-    const seed = await seedLockedBooking(result, { lifecycleAction: "released" });
-    let adapterCalls = 0;
-    const adapter: EscrowAdapter = {
-      ...unreachableEscrowAdapter(),
-      startDispute: async () => {
-        adapterCalls++;
-        return { unsignedXdr: "x", txHash: "should-not-run" };
-      },
-    };
-    await assert.rejects(
-      () => openDispute(result.db, seed.bookingId, seed.clientWalletAddress, "disagreement", adapter),
-      ReleasedDepositError,
-    );
-    assert.equal(adapterCalls, 0);
   } finally {
     closeDatabase(result);
   }

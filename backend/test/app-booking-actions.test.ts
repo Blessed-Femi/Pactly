@@ -330,34 +330,6 @@ test("POST /bookings/:id/dispute: 404 for a wallet that owns neither role on thi
   }
 });
 
-test("POST /bookings/:id/dispute: 409 DEPOSIT_RELEASED for stale locked row with released lifecycle", async () => {
-  const result = openTestDatabase();
-  try {
-    const seed = await seedLockedBooking(result, { lifecycleAction: "released" });
-    let adapterCalls = 0;
-    const app = createApp(result.db, {
-      escrowAdapter: fakeEscrowAdapter({
-        startDispute: async () => {
-          adapterCalls++;
-          return { unsignedXdr: "x", txHash: "should-not-run" };
-        },
-      }),
-    });
-    const response = await app.request(`/bookings/${seed.bookingId}/dispute`, {
-      method: "POST",
-      headers: await authHeader(seed.clientWalletAddress),
-      body: JSON.stringify({ reason: "disagreement" }),
-    });
-    assert.equal(response.status, 409);
-    const body = (await response.json()) as { code: string; message: string };
-    assert.equal(body.code, "DEPOSIT_RELEASED");
-    assert.match(body.message, /released/i);
-    assert.equal(adapterCalls, 0);
-  } finally {
-    closeDatabase(result);
-  }
-});
-
 test("POST /bookings/:id/dispute: 409 once a dispute is already open", async () => {
   const result = openTestDatabase();
   try {

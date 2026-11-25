@@ -214,9 +214,6 @@ export function BookingActions({
 
   function describeFailure(error: unknown): string {
     if (error instanceof ApiError) {
-      if (error.code === "DEPOSIT_RELEASED") {
-        return "The deposit was already released, so a dispute cannot be opened.";
-      }
       if (error.code === "BOOKING_STATE" || error.code === "ACTION_PENDING") {
         return "This booking has already moved on -- refresh to see its current state.";
       }
