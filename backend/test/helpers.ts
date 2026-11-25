@@ -9,7 +9,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
 import { openDatabase, closeDatabase, type OpenDatabaseResult } from "../src/db/client.js";
-import { categories, type BalanceState } from "../src/db/schema.js";
+import { availabilitySlots, categories, type BalanceState } from "../src/db/schema.js";
 import { insertProviderProfile } from "../src/db/providerProfiles.js";
 import { insertBooking, setAnchorDeposit } from "../src/db/bookings.js";
 import type { ChainEvent, EventName } from "../src/chain/events.js";
@@ -65,6 +65,8 @@ export interface SeedProviderProfileOptions {
   priceAmount?: string;
   depositRateBps?: number;
   cancellationWindowHours?: number;
+  minimumNoticeMinutes?: number;
+  bufferMinutes?: number;
   /** Defaults to `false`, matching the real default -- a profile this
    * story creates is unapproved until Story 4.1/4.2 decides otherwise
    * (PRD Story 4.1 AC4: an unapproved profile must never appear in a
@@ -91,6 +93,8 @@ export async function seedProviderProfile(
     priceAmount: options.priceAmount ?? "10000000",
     depositRateBps: options.depositRateBps ?? 2000,
     cancellationWindowHours: options.cancellationWindowHours ?? 24,
+    minimumNoticeMinutes: options.minimumNoticeMinutes ?? 0,
+    bufferMinutes: options.bufferMinutes ?? 0,
     isApproved: options.isApproved ?? false,
     createdAt: Date.now(),
   });
@@ -113,11 +117,7 @@ export interface SeedBookingOptions {
   balanceAmount?: string;
   balanceState?: BalanceState;
   cancelDeadline?: number;
-  /** Issue #48: `lockDeposit` now refuses a booking with no credited anchor
-   * transfer. Most tests seed one matching the deposit so they can exercise
-   * their own concern; `"none"` opts out for the short-deposit refusal. A
-   * plain decimal string credits that amount instead of the full deposit. */
-  anchorDeposit?: string | "none";
+  slotStartsAt?: number;
 }
 
 /** 32 lowercase hex characters -- the same shape `chain/client.ts`'s
@@ -133,7 +133,16 @@ export function randomBookingId(): string {
 export async function seedBooking(result: OpenDatabaseResult, options: SeedBookingOptions = {}): Promise<string> {
   const bookingId = options.bookingId ?? randomBookingId();
   const providerProfileId = options.providerProfileId ?? (await seedProviderProfile(result));
-  const depositAmount = options.depositAmount ?? "1000000";
+  const slotId = options.slotStartsAt === undefined ? undefined : randomUUID();
+  if (slotId && options.slotStartsAt !== undefined) {
+    await result.db.insert(availabilitySlots).values({
+      id: slotId,
+      providerProfileId,
+      startsAt: options.slotStartsAt,
+      withdrawnAt: null,
+      createdAt: Date.now(),
+    });
+  }
   await insertBooking(result.db, {
     id: bookingId,
     providerProfileId,
@@ -142,6 +151,7 @@ export async function seedBooking(result: OpenDatabaseResult, options: SeedBooki
     depositAmount,
     balanceAmount: options.balanceAmount,
     cancelDeadline: options.cancelDeadline ?? Math.floor(Date.now() / 1000) + 3600,
+    ...(slotId ? { slotId } : {}),
     balanceState: options.balanceState,
     createdAt: Date.now(),
   });

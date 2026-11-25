@@ -42,7 +42,7 @@ export function MyBookingsPage() {
           title="My bookings"
           lede="Sign in to see the sessions you've locked a deposit for."
         />
-        <SignInPanel onSignedIn={setSession} />
+        <SignInPanel onSignedIn={setSession} onRateLimited={(waitMs) => setError(`Too many failed sign-in attempts. Please wait ${Math.ceil(waitMs / 1000)} second${Math.ceil(waitMs / 1000) !== 1 ? "s" : ""} before trying again.`)} />
       </div>
     );
   }
@@ -106,6 +106,8 @@ export function MyBookingsPage() {
               heading={booking.provider.displayName}
               subheading={booking.provider.title}
               slotStartsAt={booking.slotStartsAt}
+              disputeDeadline={booking.disputeDeadline}
+              serverTime={booking.serverTime}
               deposit={booking.deposit}
               balance={booking.balance}
               escrowState={booking.escrowState}
@@ -118,6 +120,7 @@ export function MyBookingsPage() {
               holdReleasedReason={booking.holdReleasedReason}
               contractId={booking.contractId}
               balancePaymentTxHash={booking.balancePaymentTxHash}
+                anchorTransactionId={booking.anchorTransactionId}
               session={session}
               onActionSubmitted={() => bookingsQuery.refetch()}
               onUnauthorized={handleSignOut}
@@ -146,6 +149,7 @@ export function MyBookingsPage() {
                 heading={booking.provider.displayName}
                 subheading={booking.provider.title}
                 slotStartsAt={booking.slotStartsAt}
+                disputeDeadline={booking.disputeDeadline}
                 deposit={booking.deposit}
                 balance={booking.balance}
                 escrowState={booking.escrowState}
@@ -157,6 +161,7 @@ export function MyBookingsPage() {
                 arrivedAt={booking.arrivedAt}
                 contractId={booking.contractId}
                 balancePaymentTxHash={booking.balancePaymentTxHash}
+                anchorTransactionId={booking.anchorTransactionId}
                 session={session}
                 onActionSubmitted={() => bookingsQuery.refetch()}
                 onUnauthorized={handleSignOut}
