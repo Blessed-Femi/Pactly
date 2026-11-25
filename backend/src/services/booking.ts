@@ -593,6 +593,15 @@ export class BookingEscrowStateError extends Error {
   }
 }
 
+/** A deposit that has already been released, either in the booking row or in
+ * the matching chain lifecycle, cannot be disputed. */
+export class ReleasedDepositError extends Error {
+  constructor(message = "The deposit has already been released.") {
+    super(message);
+    this.name = "ReleasedDepositError";
+  }
+}
+
 /** A signed transaction `submitSignedTransaction` was handed does not
  * match this booking's own stored deploy or fund `txHash` -- either a
  * stale/foreign envelope, or one that failed to decode at all. Refused
@@ -1520,6 +1529,13 @@ export async function openDispute(
     throw new BookingEscrowStateError(
       `Booking "${bookingId}" has no chain-confirmed evidence yet for its current escrow contractId`,
     );
+  }
+  if (
+    (booking.escrowState as string | null) === "released"
+    || lifecycle.action === "released"
+    || (lifecycle.action === "resolved" && lifecycle.outcome === "pay-provider")
+  ) {
+    throw new ReleasedDepositError();
   }
   if (booking.escrowDisputeSubmittedAt !== null && lifecycle.action !== "disputed") {
     throw new BookingActionPendingError();

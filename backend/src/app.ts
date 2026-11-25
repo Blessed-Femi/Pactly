@@ -109,6 +109,7 @@ import {
   BookingsPausedError,
   InvalidDisputeReasonError,
   NothingToPayError,
+  ReleasedDepositError,
   ShortDepositError,
   SlotTakenError,
   SlotUnavailableError,
@@ -2219,6 +2220,9 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
       }
       if (error instanceof BookingActionPendingError) {
         return c.json({ code: "ACTION_PENDING", message: error.message }, 409);
+      }
+      if (error instanceof ReleasedDepositError) {
+        return c.json({ code: "DEPOSIT_RELEASED", message: error.message }, 409);
       }
       if (error instanceof BookingEscrowStateError) {
         return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
