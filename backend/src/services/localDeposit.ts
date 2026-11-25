@@ -342,7 +342,7 @@ async function persistOpened(
   nowMs: number,
   extraStatus?: string,
 ): Promise<void> {
-  await setAnchorDeposit(db, bookingId, {
+  const stored = await setAnchorDeposit(db, bookingId, {
     id: opened.id,
     status: extraStatus ?? "pending_user_transfer_start",
     moreInfoUrl: opened.moreInfoUrl,
@@ -351,6 +351,11 @@ async function persistOpened(
     amountIn: opened.amountIn ?? null,
     updatedAt: Math.floor(nowMs / 1000),
   });
+  if (!stored) {
+    // The booking's previous anchor deposit completed while this one was
+    // being opened: its id is kept, never replaced by this new attempt.
+    throw new BookingEscrowStateError("This booking's local-currency transfer already completed.");
+  }
 }
 
 async function openAgainstAnchor(
@@ -396,6 +401,19 @@ export async function openLocalDeposit(
     return retryFailedDeposit(db, booking, walletAddress, deps);
   }
 
+  return startAnchorDeposit(db, booking, walletAddress, deps, nowSeconds);
+}
+
+/** Opens a new anchor deposit for a held booking (or asks for the USDC
+ * trustline first). The new anchor transaction id replaces any previous,
+ * not-completed one on the booking. */
+async function startAnchorDeposit(
+  db: Db,
+  booking: BookingRow,
+  walletAddress: string,
+  deps: LocalDepositDeps,
+  nowSeconds: number,
+): Promise<OpenLocalDepositResult> {
   await requireFreshAnchorJwt(db, walletAddress, authDeps(deps));
   await enforceLimits(booking.depositAmount, deps.fetchImpl, deps.now);
 
@@ -407,7 +425,7 @@ export async function openLocalDeposit(
       { sourceAddress: walletAddress, assetCode: usdc.code, assetIssuer: usdc.issuer },
       deps.buildTrustline ?? {},
     );
-    await setAnchorTrustlineTxHash(db, bookingId, built.txHash);
+    await setAnchorTrustlineTxHash(db, booking.id, built.txHash);
     return { needsTrustline: true, unsignedXdr: built.unsignedXdr };
   }
 
@@ -419,7 +437,10 @@ export async function openLocalDeposit(
     : undefined;
   return openAgainstAnchor(db, booking, walletAddress, deps, confirmedTryAmount);
 }
-/** Story #19: retry a failed anchor deposit without starting a new hold. */
+
+/** Story #19: retry a failed anchor deposit without starting a new hold.
+ * The failed deposit's id stays on the booking until the anchor hands back
+ * a new one, so support can still trace the failed attempt meanwhile. */
 export async function retryFailedDeposit(
   db: Db,
   booking: BookingRow,
@@ -428,25 +449,16 @@ export async function retryFailedDeposit(
 ): Promise<OpenLocalDepositResult> {
   const nowSeconds = Math.floor((deps.now?.() ?? Date.now()) / 1000);
   requireHoldNotExpired(booking, nowSeconds);
-  // Verify this is a failed deposit we can retry
+  if (booking.escrowState !== null) {
+    throw new BookingEscrowStateError("This booking's deposit is already locked.");
+  }
   if (!booking.anchorDepositId) {
     throw new BookingEscrowStateError("No anchor deposit found for this booking.");
   }
-  if (booking.anchorDepositStatus && mapSep6Status(booking.anchorDepositStatus) !== "failed") {
+  if (!booking.anchorDepositStatus || mapSep6Status(booking.anchorDepositStatus) !== "failed") {
     throw new BookingEscrowStateError("Deposit is not in a failed state and cannot be retried.");
   }
-  // Reset the anchor deposit status to allow a new attempt while reusing the hold
-  await setAnchorDeposit(db, booking.id, {
-    id: booking.anchorDepositId,
-    status: "pending_user_transfer_start",
-    moreInfoUrl: booking.anchorDepositMoreInfoUrl,
-    bankDetailsJson: booking.anchorDepositBankDetails,
-    expiresAt: booking.anchorDepositExpiresAt,
-    amountIn: booking.anchorDepositAmountIn,
-    updatedAt: nowSeconds,
-  });
-  // Re-attempt the deposit from the beginning
-  return openLocalDeposit(db, booking.id, walletAddress, deps);
+  return startAnchorDeposit(db, booking, walletAddress, deps, nowSeconds);
 }
 
 export async function submitLocalDepositTrustline(

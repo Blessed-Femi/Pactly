@@ -1,43 +1,36 @@
 /**
- * Availability services, in four slices:
- *
- * - Weekly ranges (#52) and breaks (#65): the recurring hours a shop keeps,
- *   validated before they are saved.
- * - One-off closures: a calendar date a shop will not work, as an overlay on
- *   its repeating slot pattern. A single day off must not mean deleting that
- *   day's slots and rebuilding them next week, so a closure hides a *calendar
- *   date*; the slot rows stay exactly where they are and reopening the date
- *   reveals them again. Nothing here touches bookings: a date holding a
- *   locked booking is refused outright (with the booking's id, so the panel
- *   can name it) rather than silently cancelling anyone's appointment.
- * - The appointment buffer and the offered-slot queries built on it: after a
- *   locked booking ends, `bufferMinutes` stay free before another slot of the
- *   same shop is offered. Weekly hours and existing locked bookings are never
- *   rewritten here -- this module only filters what clients are shown (and
- *   what `holdSlot` may claim).
- * - Reschedule: moving a caller's own locked booking to another open slot
- *   inside the booking's free-cancellation window.
+ * Availability services:
+ * - Weekly recurring availability validation (Issue #52)
+ * - Break windows inside a day's hours (Issue #65)
+ * - One-off date closures as an overlay on repeating patterns
+ * - Appointment buffer gaps between bookings
+ * - Rescheduling locked bookings and provider date closure window
  */
 import { and, eq } from "drizzle-orm";
 
+import type { Db } from "../db/client.js";
+import { availabilitySlots, bookings } from "../db/schema.js";
 import {
   closeSlotsInRange,
+  getSlotById,
   getSlotByProviderAndStart,
   listEarliestFutureSlotsByProvider,
   listOpenFutureSlots,
   listOpenSlotsInRange,
   type ListFutureSlotsOptions,
 } from "../db/availabilitySlots.js";
-import { releaseUnpaidHoldsForProviderDate, rescheduleBookingSlot } from "../db/bookings.js";
 import {
-  deleteClosedDate,
-  insertClosedDate,
-  isDateClosed,
+  releaseUnpaidHoldsForProviderDate,
+  rescheduleBookingSlot,
+} from "../db/bookings.js";
+import {
   isValidClosedDate,
+  insertClosedDate,
+  deleteClosedDate,
+  isDateClosed,
   listClosedDates,
   listLockedBookingsOnDate,
 } from "../db/closedDates.js";
-import type { Db } from "../db/client.js";
 import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
 import { availabilitySlots, bookings } from "../db/schema.js";
 import {
@@ -50,10 +43,12 @@ import {
 import { NotAProviderError } from "./profile.js";
 import { zonedClock } from "./timezone.js";
 
-// ---------------------------------------------------------------------------
-// Issue #52: weekly availability ranges.
-// ---------------------------------------------------------------------------
+export { NotAProviderError };
 
+
+// ---------------------------------------------------------------------------
+// Weekly availability range validation (Issue #52)
+// ---------------------------------------------------------------------------
 /**
  * Issue #52: Weekly availability range management and validation.
  * Providers can define recurring weekly availability ranges (e.g., "Monday 09:00-12:00")
@@ -94,30 +89,29 @@ function rangesOverlap(range1: WeeklyTimeRange, range2: WeeklyTimeRange): boolea
   if (range1.weekday !== range2.weekday) {
     return false;
   }
-
-  // Two ranges overlap if one starts before the other ends AND the other starts before the first ends.
-  // Touching counts as an overlap (the shared minute would be double-booked),
-  // so the comparison is inclusive on both ends.
+  
+  // Two ranges overlap if one starts before the other ends AND the other starts before the first ends
+  // Since touching is considered an overlap, we use <= instead of <
   return range1.startMinutes <= range2.endMinutes && range2.startMinutes <= range1.endMinutes;
 }
 
 /**
  * Issue #52: Validates that weekly availability ranges don't overlap on the same weekday.
  * Returns an array of overlap errors. Empty array means valid.
- *
+ * 
  * Edge cases:
  * - Ranges on different weekdays may share clock times (not an overlap)
  * - A range that ends at the next range's start is an overlap
  */
 export function validateWeeklyRanges(ranges: WeeklyTimeRange[]): OverlapError[] {
   const errors: OverlapError[] = [];
-
+  
   // Check each pair of ranges for overlaps
   for (let i = 0; i < ranges.length; i++) {
     for (let j = i + 1; j < ranges.length; j++) {
       const range1 = ranges[i]!;
       const range2 = ranges[j]!;
-
+      
       if (rangesOverlap(range1, range2)) {
         errors.push({
           weekday: range1.weekday,
@@ -133,7 +127,7 @@ export function validateWeeklyRanges(ranges: WeeklyTimeRange[]): OverlapError[] 
       }
     }
   }
-
+  
   return errors;
 }
 
@@ -144,12 +138,12 @@ export function formatOverlapErrors(errors: OverlapError[]): string {
   if (errors.length === 0) {
     return "";
   }
-
+  
   const messages = errors.map((error) => {
     const weekdayName = WEEKDAY_NAMES[error.weekday] ?? `Day ${error.weekday}`;
     return `${weekdayName}: ${error.range1.start}–${error.range1.end} overlaps with ${error.range2.start}–${error.range2.end}`;
   });
-
+  
   return messages.join("; ");
 }
 
@@ -163,10 +157,10 @@ export class WeeklyRangeOverlapError extends Error {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Issue #65: a break cut out of one day's hours.
-// ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Break windows inside working hours (Issue #65)
+// ---------------------------------------------------------------------------
 /**
  * Issue #65: a break cut out of one day's hours.
  *
@@ -330,19 +324,22 @@ export function filterSlotsOutsideBreaks(
 }
 
 // ---------------------------------------------------------------------------
-// One-off closures (calendar dates) and the appointment buffer.
+// One-off date closures
 // ---------------------------------------------------------------------------
-
 /**
- * Availability services: one-off closures as an overlay on a provider's
- * repeating slot pattern, and the appointment buffer that keeps a gap after
- * a locked booking.
+ * One-off availability closures.
  *
- * After a locked booking ends, `bufferMinutes` stay free before another
- * slot of the same shop is offered. Weekly hours and existing locked
- * bookings are never rewritten here -- this module only filters what clients
- * are shown (and what `holdSlot` may claim).
+ * A provider's repeating slot pattern is a valuable thing to keep: a single
+ * day off must not mean deleting that day's slots and rebuilding them next
+ * week. This service therefore closes a *calendar date* as an overlay. The
+ * slots stay exactly where they are; every client-facing slot read hides the
+ * closed day's slots, and removing the closure reveals them again.
+ *
+ * Nothing here touches bookings. A date that already carries a locked
+ * booking is refused outright (with the booking's id, so the panel can name
+ * it) rather than silently cancelling anyone's appointment.
  */
+
 
 export class InvalidClosedDateError extends Error {
   readonly details: Record<string, string>;
@@ -405,6 +402,9 @@ export async function closeDate(
   return listClosedDates(db, providerProfileId);
 }
 
+/** Alias named for the shop-facing wording. */
+export const closeAvailabilityDate = closeDate;
+
 /** Removes a closure. Removing a date that was never closed is a no-op. */
 export async function reopenDate(db: Db, walletAddress: string, date: unknown): Promise<string[]> {
   if (!isValidClosedDate(date)) {
@@ -415,11 +415,29 @@ export async function reopenDate(db: Db, walletAddress: string, date: unknown): 
   return listClosedDates(db, providerProfileId);
 }
 
+export const reopenProviderDate = reopenDate;
+export const openDate = reopenDate;
+/** Panel wording: a closed date is a blocked date, not a deleted slot. */
+export const blockDate = closeDate;
+export const unblockDate = reopenDate;
+export const setDateClosed = closeDate;
+
 /** Every closed UTC date for the caller's shop, ascending. */
 export async function listClosedDatesForWallet(db: Db, walletAddress: string): Promise<string[]> {
   const providerProfileId = await ownProviderId(db, walletAddress);
   return listClosedDates(db, providerProfileId);
 }
+
+// ---------------------------------------------------------------------------
+// Appointment buffers
+// ---------------------------------------------------------------------------
+/**
+ * Appointment buffer: after a locked booking ends, keep `bufferMinutes`
+ * free before another slot of the same shop is offered. Weekly hours and
+ * existing locked bookings are never rewritten here -- this module only
+ * filters what clients are shown (and what `holdSlot` may claim).
+ */
+
 
 /** True when `slotStartsAt` falls in the half-open window
  * `[sessionEnd, sessionEnd + buffer)` after a locked booking that started
@@ -548,9 +566,33 @@ export async function listEarliestOfferedSlotsByProvider(
 }
 
 // ---------------------------------------------------------------------------
-// Closing a whole date the shop-facing way (releases unpaid holds), and
-// rescheduling a locked booking inside its free-cancellation window.
+// Rescheduling & Date Closure Resolution
 // ---------------------------------------------------------------------------
+/**
+ * Closing a whole date (this issue's own slice of availability): a shop
+ * that will not work on a given day must not leave a client's unpaid hold
+ * sitting on that day's slot until its ten-minute clock runs out.
+ *
+ * "Closing a date" here means removing that date's concrete future slots
+ * (this build has no recurring weekly rule to preserve -- every other date
+ * is left exactly as it was) and releasing every still-active, unpaid hold
+ * whose slot starts on it. A booking that already has a funded escrow is
+ * never touched: the response names it in `needsResolution`, which the
+ * provider panel shows with a link to Bookings. Storage for a *blocked*
+ * date as its own row is explicitly out of scope for this issue.
+ *
+ * No SQL lives here -- the two writes are `db/bookings.ts`'s
+ * `releaseUnpaidHoldsForProviderDate` and `db/availabilitySlots.ts`'s
+ * `closeSlotsInRange`.
+ */
+
+const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DAY_SECONDS = 24 * 60 * 60;
+/** Longest holiday a single close action may cover, inclusive. */
+export const MAX_CLOSE_RANGE_DAYS = 31;
+/** `Date#getTimezoneOffset`'s own documented range, in minutes. */
+const MIN_TZ_OFFSET_MINUTES = -14 * 60;
+const MAX_TZ_OFFSET_MINUTES = 14 * 60;
 
 /** A locked booking can only move while its own free-cancellation window
  * (the existing `cancel_deadline`) is still open. */
@@ -564,15 +606,18 @@ export class BookingOutsideCancellationWindowError extends Error {
 export class InvalidCloseDateError extends Error {
   readonly details: Record<string, string>;
   constructor(details: Record<string, string>) {
-    super("Pick a valid date to close.");
+    super(details.endDate ?? "Pick a valid date to close.");
     this.name = "InvalidCloseDateError";
     this.details = details;
   }
 }
 
 export interface CloseProviderDateInput {
-  /** Local calendar date, `YYYY-MM-DD`. */
+  /** Local calendar date, `YYYY-MM-DD` -- the first day closed. */
   date: string;
+  /** Optional last day closed, inclusive, `YYYY-MM-DD`. Omitted means only
+   * `date`. At most {@link MAX_CLOSE_RANGE_DAYS} days in all. */
+  endDate?: string;
   /** `new Date().getTimezoneOffset()` from the caller's browser -- the same
    * signed-minutes convention `POST /bookings/hold` already uses. Omitted
    * means UTC. */
@@ -581,6 +626,9 @@ export interface CloseProviderDateInput {
 
 export interface CloseProviderDateView {
   date: string;
+  endDate: string;
+  /** Number of calendar dates closed (1 for a single date). */
+  dayCount: number;
   /** UTC epoch seconds of the local day's start/end, echoed so a caller can
    * check exactly which window was closed. */
   rangeStart: number;
@@ -722,8 +770,51 @@ export async function rescheduleLockedBooking(
   return getBookingView(db, bookingId, walletAddress);
 }
 
-const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
-const DAY_SECONDS = 24 * 60 * 60;
-/** `Date#getTimezoneOffset`'s own documented range, in minutes. */
-const MIN_TZ_OFFSET_MINUTES = -14 * 60;
-const MAX_TZ_OFFSET_MINUTES = 14 * 60;
+/**
+ * `POST /me/provider/availability/close-date`: resolves the caller's own
+ * provider profile and closes one date, or every date from `date` through
+ * `endDate` inclusive (at most 31). Releases those dates' active unpaid holds (recording
+ * `shop-closed-date` on them so their clients see why), then removes that
+ * date's future open slots. Other dates are untouched. Idempotent: closing
+ * an already-closed or hold-free date succeeds and reports zero releases.
+ */
+export async function closeProviderDate(
+  db: Db,
+  walletAddress: string,
+  input: CloseProviderDateInput,
+  now: number = Math.floor(Date.now() / 1000),
+): Promise<CloseProviderDateView> {
+  const profile = await getProviderProfileByWallet(db, walletAddress);
+  if (!profile) {
+    throw new NotAProviderError();
+  }
+  const tzOffset = input.tzOffsetMinutes ?? 0;
+  const endDate = input.endDate && input.endDate !== "" ? input.endDate : input.date;
+  const { rangeStart } = localDateRange(input.date, tzOffset);
+  const { rangeEnd } = localDateRange(endDate, tzOffset);
+  if (rangeEnd <= rangeStart) {
+    throw new InvalidCloseDateError({ endDate: "The end date cannot be before the start date." });
+  }
+  const dayCount = Math.round((rangeEnd - rangeStart) / DAY_SECONDS);
+  if (dayCount > MAX_CLOSE_RANGE_DAYS) {
+    throw new InvalidCloseDateError({ endDate: `Close at most ${MAX_CLOSE_RANGE_DAYS} days at once.` });
+  }
+
+  const release = await releaseUnpaidHoldsForProviderDate(db, profile.id, rangeStart, rangeEnd, now);
+  const closedSlotCount = await closeSlotsInRange(db, profile.id, rangeStart, rangeEnd, now);
+
+  return {
+    date: input.date,
+    endDate,
+    dayCount,
+    rangeStart,
+    rangeEnd,
+    releasedHoldCount: release.released.length,
+    releasedBookingIds: release.released.map((booking) => booking.bookingId),
+    closedSlotCount,
+    needsResolution: release.needsResolution.map((booking) => ({
+      bookingId: booking.bookingId,
+      slotStartsAt: booking.slotStartsAt,
+    })),
+  };
+}
